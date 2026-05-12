@@ -1,0 +1,244 @@
+name: 02 - 🔍 جستجوی پیشرفته یوتیوب
+
+on:
+  workflow_dispatch:
+    inputs:
+      search_query:
+        description: '📝 عبارت جستجو'
+        required: true
+        type: string
+      max_results:
+        description: '🔢 تعداد نتایج (حداکثر ۵۰۰)'
+        required: false
+        default: '50'
+        type: string
+      video_type:
+        description: '🎬 نوع ویدیو'
+        required: false
+        default: 'any'
+        type: choice
+        options:
+          - any
+          - short
+          - long
+      sort_by:
+        description: '📊 مرتب‌سازی بر اساس'
+        required: false
+        default: 'relevance'
+        type: choice
+        options:
+          - relevance
+          - date
+          - views
+      include_description:
+        description: '📄 شامل توضیحات ویدیو (تعداد کاراکتر)'
+        required: false
+        default: '0'
+        type: choice
+        options:
+          - '0'
+          - '100'
+          - '250'
+          - '500'
+      output_format:
+        description: '📄 فرمت خروجی'
+        required: false
+        default: 'markdown'
+        type: choice
+        options:
+          - markdown
+          - json
+          - csv
+
+jobs:
+  advanced-search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - name: نصب پیش‌نیازها
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip jq
+          pip3 install --upgrade yt-dlp
+
+      - name: اجرای جستجوی پیشرفته
+        id: search
+        env:
+          QUERY: ${{ github.event.inputs.search_query }}
+          MAX_RESULTS: ${{ github.event.inputs.max_results }}
+          VIDEO_TYPE: ${{ github.event.inputs.video_type }}
+          SORT_BY: ${{ github.event.inputs.sort_by }}
+          DESC_LEN: ${{ github.event.inputs.include_description }}
+          OUTPUT_FORMAT: ${{ github.event.inputs.output_format }}
+        run: |
+          # تابع تبدیل ثانیه به زمان
+          seconds_to_time() {
+            local secs=$1
+            if [ -z "$secs" ] || [ "$secs" = "0" ]; then
+              echo "نامشخص"
+              return
+            fi
+            printf "%02d:%02d:%02d" $((secs/3600)) $(((secs%3600)/60)) $((secs%60))
+          }
+          
+          # تابع تبدیل تاریخ یوتیوب (YYYYMMDD) به شمسی؟ خیر، میلادی نمایش میدیم
+          format_date() {
+            local ytdate=$1
+            if [[ "$ytdate" =~ ^([0-9]{4})([0-9]{2})([0-9]{2})$ ]]; then
+              echo "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"
+            else
+              echo "$ytdate"
+            fi
+          }
+          
+          # تعیین پارامترهای مرتب‌سازی برای لینک جستجو
+          # یوتیوب: sp=CAI%3D (relevance), sp=CAI%3D? sort by date, sp=CAM%3D? etc
+          case "$SORT_BY" in
+            date)
+              SORT_PARAM="&sp=CAI%3D"
+              ;;
+            views)
+              SORT_PARAM="&sp=CAM%3D"
+              ;;
+            *)
+              SORT_PARAM=""
+              ;;
+          esac
+          
+          # ساخت URL جستجو با فیلتر نوع ویدیو
+          # فیلتر مدت زمان: short (زیر ۴ دقیقه) - long (بالای ۱۰ دقیقه)
+          # با اضافه کردن پارامترهای duration به URL
+          if [ "$VIDEO_TYPE" = "short" ]; then
+            DURATION_FILTER="&sp=EgIYA0gBUABQBA%3D%3D"  # کوتاه (زیر 4 دقیقه)
+          elif [ "$VIDEO_TYPE" = "long" ]; then
+            DURATION_FILTER="&sp=EgIYA1ABUAFQAg%3D%3D"  # بلند (بالای 20 دقیقه تقریبا)
+          else
+            DURATION_FILTER=""
+          fi
+          
+          SEARCH_URL="https://www.youtube.com/results?search_query=$(echo "$QUERY" | sed 's/ /+/g')${SORT_PARAM}${DURATION_FILTER}"
+          echo "URL جستجو: $SEARCH_URL"
+          
+          # حداکثر تعداد نتایج
+          MAX=$((MAX_RESULTS))
+          if [ $MAX -gt 500 ]; then MAX=500; fi
+          
+          echo "🔍 در حال جستجوی '$QUERY' (حداکثر $MAX نتیجه)..."
+          echo "نوع: $VIDEO_TYPE | مرتب‌سازی: $SORT_BY"
+          
+          # استفاده از yt-dlp برای دریافت لیست کامل
+          # فرمت خروجی: title|webpage_url|duration|view_count|uploader|upload_date|description|thumbnail
+          yt-dlp \
+            --flat-playlist \
+            --print "%(title)s|%(webpage_url)s|%(duration)s|%(view_count)s|%(uploader)s|%(upload_date)s|%(description)s|%(thumbnail)s" \
+            "ytsearch${MAX}:${QUERY}" 2>/dev/null > raw_results.txt
+          
+          # فایل خروجی نهایی
+          if [ "$OUTPUT_FORMAT" = "json" ]; then
+            FINAL_FILE="search_results.json"
+            echo "[" > "$FINAL_FILE"
+          elif [ "$OUTPUT_FORMAT" = "csv" ]; then
+            FINAL_FILE="search_results.csv"
+            echo "title,url,duration,views,uploader,upload_date,description,thumbnail" > "$FINAL_FILE"
+          else
+            FINAL_FILE="SEARCH_RESULTS.md"
+            cat > "$FINAL_FILE" << 'EOF'
+# نتایج جستجوی یوتیوب
+
+| # | تصویر | عنوان | کانال | مدت | بازدید | تاریخ | لینک |
+|---|-------|-------|-------|-----|--------|-------|------|
+EOF
+          fi
+          
+          COUNT=0
+          while IFS='|' read -r title url duration views uploader upload_date desc thumbnail; do
+            [ -z "$title" ] && continue
+            COUNT=$((COUNT + 1))
+            [ $COUNT -gt $MAX ] && break
+            
+            # تبدیل مدت زمان
+            dur_str=$(seconds_to_time "$duration")
+            
+            # تبدیل تعداد بازدید
+            if [[ "$views" =~ ^[0-9]+$ ]]; then
+              if [ $views -ge 1000000 ]; then
+                views_str="$((views / 1000000))M"
+              elif [ $views -ge 1000 ]; then
+                views_str="$((views / 1000))K"
+              else
+                views_str="$views"
+              fi
+            else
+              views_str="نامشخص"
+            fi
+            
+            # تاریخ
+            date_str=$(format_date "$upload_date")
+            
+            # توضیحات (در صورت نیاز)
+            if [ "$DESC_LEN" != "0" ] && [ -n "$desc" ]; then
+              desc_short=$(echo "$desc" | head -c "$DESC_LEN")
+              [ ${#desc} -gt "$DESC_LEN" ] && desc_short="${desc_short}..."
+            else
+              desc_short=""
+            fi
+            
+            # تامنیل (در مارک‌داون از نشانی تصویر استفاده می‌کنیم)
+            thumb_url="$thumbnail"
+            
+            case "$OUTPUT_FORMAT" in
+              json)
+                cat >> "$FINAL_FILE" << EOF
+  {
+    "index": $COUNT,
+    "title": "$(echo "$title" | sed 's/"/\\"/g')",
+    "url": "$url",
+    "duration": "$dur_str",
+    "views": "$views_str",
+    "uploader": "$(echo "$uploader" | sed 's/"/\\"/g')",
+    "upload_date": "$date_str",
+    "thumbnail": "$thumb_url",
+    "description": "$(echo "$desc_short" | sed 's/"/\\"/g')"
+  },
+EOF
+                ;;
+              csv)
+                echo "\"$title\",\"$url\",\"$dur_str\",\"$views_str\",\"$uploader\",\"$date_str\",\"$desc_short\",\"$thumb_url\"" >> "$FINAL_FILE"
+                ;;
+              *)
+                # مارک‌داون با تامنیل کوچک (اختیاری)
+                printf "| %d | <img src=\"%s\" width=\"80\"> | **%s** | %s | %s | %s | %s | [🔗]($s) |\n" \
+                  "$COUNT" "$thumb_url" "$title" "$uploader" "$dur_str" "$views_str" "$date_str" "$url" >> "$FINAL_FILE"
+                ;;
+            esac
+          done < raw_results.txt
+          
+          # بستن JSON
+          if [ "$OUTPUT_FORMAT" = "json" ]; then
+            # حذف کاما آخر و بستن
+            sed -i '$ s/,$//' "$FINAL_FILE"
+            echo "" >> "$FINAL_FILE"
+            echo "]" >> "$FINAL_FILE"
+          fi
+          
+          echo ""
+          echo "✅ جستجو کامل شد. تعداد نتایج: $COUNT"
+          echo "FOUND_COUNT=$COUNT" >> $GITHUB_ENV
+          echo "RESULT_FILE=$FINAL_FILE" >> $GITHUB_ENV
+
+      - name: ذخیره نتایج به عنوان آرتیفکت
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-search-results
+          path: ${{ env.RESULT_FILE }}
+          retention-days: 7
+
+      - name: نمایش خلاصه نتایج (برای مارک‌داون)
+        if: github.event.inputs.output_format == 'markdown'
+        run: |
+          echo "## 🔍 نتایج جستجو" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          cat "$RESULT_FILE" >> $GITHUB_STEP_SUMMARY
